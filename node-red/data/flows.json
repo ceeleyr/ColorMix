@@ -1,0 +1,763 @@
+[
+  {
+    "id": "tab_main",
+    "type": "tab",
+    "label": "ColorMix",
+    "disabled": false,
+    "info": "Scanner -> Node-RED -> MQTT (ESP32) + InfluxDB (Grafana)"
+  },
+  {
+    "id": "tab_sim",
+    "type": "tab",
+    "label": "Simulator ESP32",
+    "disabled": true,
+    "info": "Aktifkan tab ini (double-click tab -> Enabled) untuk demo tanpa ESP32. Matikan lagi saat ESP32 asli dipakai."
+  },
+  {
+    "id": "broker",
+    "type": "mqtt-broker",
+    "name": "Mosquitto",
+    "broker": "mosquitto",
+    "port": "1883",
+    "clientid": "colormix-nodered",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthRetain": "false",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closeRetain": "false",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willRetain": "false",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  },
+  {
+    "id": "influx",
+    "type": "influxdb",
+    "hostname": "influxdb",
+    "port": "8086",
+    "protocol": "http",
+    "database": "colormix",
+    "name": "InfluxDB colormix",
+    "usetls": false,
+    "tls": "",
+    "influxdbVersion": "1.x",
+    "url": "",
+    "timeout": "10",
+    "rejectUnauthorized": false
+  },
+  {
+    "id": "c1",
+    "type": "comment",
+    "z": "tab_main",
+    "name": "① Order dari halaman scanner",
+    "info": "",
+    "x": 180,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "httpOrder",
+    "type": "http in",
+    "z": "tab_main",
+    "name": "POST /api/order",
+    "url": "/api/order",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 150,
+    "y": 100,
+    "wires": [
+      [
+        "validate"
+      ]
+    ]
+  },
+  {
+    "id": "validate",
+    "type": "function",
+    "z": "tab_main",
+    "name": "Validate & hitung dosis",
+    "func": "// Input: msg.payload = JSON dari QR (dikirim halaman scanner)\nconst o = msg.payload || {};\nconst bad = (code, status, error) => {\n  msg.statusCode = status;\n  msg.payload = { ok: false, code, error };\n  return [null, null, msg];\n};\n\nif (o.v !== 1) return bad(\"invalid\", 400, \"Versi format (v) harus 1\");\nif (typeof o.id !== \"string\" || !o.id || o.id.length > 64) return bad(\"invalid\", 400, \"Field id tidak valid\");\nfor (const k of [\"r\", \"g\", \"b\"]) {\n  if (!Number.isInteger(o[k]) || o[k] < 0 || o[k] > 255) return bad(\"invalid\", 400, \"Nilai \" + k + \" harus integer 0-255\");\n}\nif (typeof o.vol !== \"number\" || o.vol <= 0 || o.vol > 5000) return bad(\"invalid\", 400, \"Volume harus 1-5000 ml\");\n\nconst esp = flow.get(\"espStatus\") || {};\nif ([\"mixing\", \"tuning\", \"priming\"].includes(esp.state)) return bad(\"busy\", 409, \"Mixer sedang sibuk (\" + esp.state + (esp.order ? \" order \" + esp.order : \"\") + \")\");\n\nconst done = flow.get(\"processedIds\") || [];\nif (done.includes(o.id) && !o.force) return bad(\"duplicate\", 409, \"Order sudah pernah diproses\");\n\n// RGB -> takaran cat dasar Merah, Hijau, Biru (ml), sebanding dengan nilai R:G:B.\n// Sama dengan computeDose() di web/common.js\nlet sum = o.r + o.g + o.b;\nconst parts = sum > 0 ? { red: o.r, green: o.g, blue: o.b } : { red: 1, green: 1, blue: 1 };\nif (sum === 0) sum = 3;   // RGB(0,0,0): campur rata (hasilnya gelap)\nconst dose = {};\nfor (const p in parts) dose[p] = Math.round(parts[p] / sum * o.vol * 10) / 10;\n\nconst hex = \"#\" + [o.r, o.g, o.b].map(v => v.toString(16).padStart(2, \"0\")).join(\"\").toUpperCase();\nconst order = {\n  id: o.id,\n  name: String(o.name || \"Custom\").slice(0, 32),\n  r: o.r, g: o.g, b: o.b, hex: hex,\n  vol: o.vol,\n  dose: dose,\n  ts: Date.now()\n};\nflow.set(\"processedIds\", [o.id].concat(done.filter(x => x !== o.id)).slice(0, 200));\n\n// 1) ke ESP32\nconst mqttMsg = { topic: \"colormix/order\", payload: order };\n// 2) ke InfluxDB: [fields, tags]\nconst influxMsg = { payload: [{\n  r: o.r, g: o.g, b: o.b, vol: o.vol,\n  red_ml: dose.red, green_ml: dose.green, blue_ml: dose.blue,\n  name: order.name, hex: hex, order_id: o.id\n}, { source: \"scanner\" }] };\n// 3) balasan HTTP ke scanner\nmsg.statusCode = 200;\nmsg.payload = { ok: true, order: order };\nif (!esp.state || esp.state === \"offline\") {\n  msg.payload.warning = \"ESP32 sedang offline - order tetap dipublish, tapi mungkin tidak diterima\";\n}\nreturn [mqttMsg, influxMsg, msg];",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 390,
+    "y": 100,
+    "wires": [
+      [
+        "mqttOrder",
+        "dbgOrder"
+      ],
+      [
+        "influxOrders"
+      ],
+      [
+        "httpRes1"
+      ]
+    ],
+    "outputLabels": [
+      "MQTT ke ESP32",
+      "InfluxDB",
+      "HTTP response"
+    ]
+  },
+  {
+    "id": "mqttOrder",
+    "type": "mqtt out",
+    "z": "tab_main",
+    "name": "colormix/order",
+    "topic": "colormix/order",
+    "qos": "1",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker",
+    "x": 650,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "dbgOrder",
+    "type": "debug",
+    "z": "tab_main",
+    "name": "order",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 630,
+    "y": 20,
+    "wires": []
+  },
+  {
+    "id": "influxOrders",
+    "type": "influxdb out",
+    "z": "tab_main",
+    "influxdb": "influx",
+    "name": "orders",
+    "measurement": "orders",
+    "precision": "",
+    "retentionPolicy": "",
+    "database": "",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "",
+    "bucket": "",
+    "x": 630,
+    "y": 100,
+    "wires": []
+  },
+  {
+    "id": "httpRes1",
+    "type": "http response",
+    "z": "tab_main",
+    "name": "",
+    "statusCode": "",
+    "headers": {},
+    "x": 630,
+    "y": 140,
+    "wires": []
+  },
+  {
+    "id": "c2",
+    "type": "comment",
+    "z": "tab_main",
+    "name": "② Status dari ESP32",
+    "info": "",
+    "x": 160,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "mqttStatus",
+    "type": "mqtt in",
+    "z": "tab_main",
+    "name": "colormix/status",
+    "topic": "colormix/status",
+    "qos": "1",
+    "datatype": "json",
+    "broker": "broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 280,
+    "wires": [
+      [
+        "saveStatus",
+        "dbgStatus"
+      ]
+    ]
+  },
+  {
+    "id": "saveStatus",
+    "type": "function",
+    "z": "tab_main",
+    "name": "Simpan status ESP32",
+    "func": "// Input: status dari ESP32 di topic colormix/status\nconst s = (msg.payload && typeof msg.payload === \"object\") ? msg.payload : {};\ns.ts = Date.now();\nflow.set(\"espStatus\", s);\n\nconst codes = { offline: 0, idle: 1, mixing: 2, done: 3, tuning: 4, priming: 5, error: -1 };\nconst state = String(s.state || \"unknown\");\nmsg.payload = [{\n  state: state,\n  state_code: state in codes ? codes[state] : -2,\n  progress: Number(s.progress) || 0,\n  rssi: Number(s.rssi) || 0,\n  order_id: String(s.order || \"\")\n}, { device: String(s.device || \"esp32\") }];\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 390,
+    "y": 280,
+    "wires": [
+      [
+        "influxStatus"
+      ]
+    ]
+  },
+  {
+    "id": "influxStatus",
+    "type": "influxdb out",
+    "z": "tab_main",
+    "influxdb": "influx",
+    "name": "esp_status",
+    "measurement": "esp_status",
+    "precision": "",
+    "retentionPolicy": "",
+    "database": "",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "",
+    "bucket": "",
+    "x": 630,
+    "y": 280,
+    "wires": []
+  },
+  {
+    "id": "dbgStatus",
+    "type": "debug",
+    "z": "tab_main",
+    "name": "status",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 370,
+    "y": 320,
+    "wires": []
+  },
+  {
+    "id": "c3",
+    "type": "comment",
+    "z": "tab_main",
+    "name": "③ Status untuk halaman scanner",
+    "info": "",
+    "x": 190,
+    "y": 400,
+    "wires": []
+  },
+  {
+    "id": "httpStatus",
+    "type": "http in",
+    "z": "tab_main",
+    "name": "GET /api/status",
+    "url": "/api/status",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 150,
+    "y": 460,
+    "wires": [
+      [
+        "getStatus"
+      ]
+    ]
+  },
+  {
+    "id": "getStatus",
+    "type": "function",
+    "z": "tab_main",
+    "name": "Ambil status terakhir",
+    "func": "msg.payload = flow.get(\"espStatus\") || { state: \"unknown\" };\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 380,
+    "y": 460,
+    "wires": [
+      [
+        "httpRes2"
+      ]
+    ]
+  },
+  {
+    "id": "httpRes2",
+    "type": "http response",
+    "z": "tab_main",
+    "name": "",
+    "statusCode": "",
+    "headers": {},
+    "x": 590,
+    "y": 460,
+    "wires": []
+  },
+  {
+    "id": "c4",
+    "type": "comment",
+    "z": "tab_main",
+    "name": "④ ESP32-S3: telemetry PID & hasil tuning Cohen-Coon",
+    "info": "",
+    "x": 230,
+    "y": 540,
+    "wires": []
+  },
+  {
+    "id": "mqttTele",
+    "type": "mqtt in",
+    "z": "tab_main",
+    "name": "colormix/telemetry",
+    "topic": "colormix/telemetry",
+    "qos": "0",
+    "datatype": "json",
+    "broker": "broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 170,
+    "y": 600,
+    "wires": [
+      [
+        "teleFn"
+      ]
+    ]
+  },
+  {
+    "id": "teleFn",
+    "type": "function",
+    "z": "tab_main",
+    "name": "Telemetry -> Influx",
+    "func": "// Input: telemetry PID dari ESP32-S3 (colormix/telemetry), tiap 0.5 s saat TRIM\nconst t = msg.payload || {};\nconst f = {};\nfor (const k of [\"tr\",\"tg\",\"tb\",\"yr\",\"yg\",\"yb\",\"mr\",\"mg\",\"mb\",\"ur\",\"ug\",\"ub\",\"err\"]) {\n  if (typeof t[k] === \"number\") f[k] = t[k];\n}\nif (!Object.keys(f).length) return null;\nmsg.payload = [f, { order: String(t.order || \"\"), phase: String(t.phase || \"\") }];\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 390,
+    "y": 600,
+    "wires": [
+      [
+        "influxColor"
+      ]
+    ]
+  },
+  {
+    "id": "influxColor",
+    "type": "influxdb out",
+    "z": "tab_main",
+    "influxdb": "influx",
+    "name": "color_pid",
+    "measurement": "color_pid",
+    "precision": "",
+    "retentionPolicy": "",
+    "database": "",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "",
+    "bucket": "",
+    "x": 620,
+    "y": 600,
+    "wires": []
+  },
+  {
+    "id": "mqttTune",
+    "type": "mqtt in",
+    "z": "tab_main",
+    "name": "colormix/tune",
+    "topic": "colormix/tune",
+    "qos": "1",
+    "datatype": "json",
+    "broker": "broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 150,
+    "y": 660,
+    "wires": [
+      [
+        "tuneFn",
+        "dbgTune"
+      ]
+    ]
+  },
+  {
+    "id": "tuneFn",
+    "type": "function",
+    "z": "tab_main",
+    "name": "Hasil Cohen-Coon -> Influx",
+    "func": "// Input: hasil Cohen-Coon / info (colormix/tune)\nconst t = msg.payload || {};\nif (t.type === \"tune\" && t.ok) {\n  flow.set(\"tune_\" + t.pump, t);\n  msg.payload = [{ K: t.K, Kv: t.Kv, tau: t.tau, theta: t.theta, kp: t.kp, Ti: t.Ti, Td: t.Td,\n                   ki: t.ki, kd: t.kd, step_ml: t.ml, vol: t.vol, dy: t.dy }, { pump: String(t.pump) }];\n  return msg;\n}\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 400,
+    "y": 660,
+    "wires": [
+      [
+        "influxTune"
+      ]
+    ]
+  },
+  {
+    "id": "influxTune",
+    "type": "influxdb out",
+    "z": "tab_main",
+    "influxdb": "influx",
+    "name": "tuning",
+    "measurement": "tuning",
+    "precision": "",
+    "retentionPolicy": "",
+    "database": "",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "",
+    "bucket": "",
+    "x": 620,
+    "y": 660,
+    "wires": []
+  },
+  {
+    "id": "dbgTune",
+    "type": "debug",
+    "z": "tab_main",
+    "name": "tune / info",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 380,
+    "y": 700,
+    "wires": []
+  },
+  {
+    "id": "c5",
+    "type": "comment",
+    "z": "tab_main",
+    "name": "⑤ Perintah ke ESP32-S3 (klik tombol kiri)",
+    "info": "",
+    "x": 200,
+    "y": 780,
+    "wires": []
+  },
+  {
+    "id": "injWhite",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Kalibrasi PUTIH",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"calwhite\"}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 820,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injBlack",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Kalibrasi HITAM",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"calblack\"}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 860,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injTuneR",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Tune Cohen-Coon MERAH",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"tune\",\"pump\":\"red\",\"ml\":5,\"vol\":250,\"ms\":20000}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 900,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injTuneG",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Tune Cohen-Coon HIJAU",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"tune\",\"pump\":\"green\",\"ml\":5,\"vol\":250,\"ms\":20000}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 940,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injTuneB",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Tune Cohen-Coon BIRU",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"tune\",\"pump\":\"blue\",\"ml\":5,\"vol\":250,\"ms\":20000}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 980,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injPrime",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Prime pompa MERAH 3s",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"prime\",\"pump\":\"red\",\"ms\":3000}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 1020,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injInfo",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "Info parameter",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"info\"}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 1060,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "injStop",
+    "type": "inject",
+    "z": "tab_main",
+    "name": "STOP darurat",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"stop\"}",
+    "payloadType": "json",
+    "x": 170,
+    "y": 1100,
+    "wires": [
+      [
+        "mqttCmd"
+      ]
+    ]
+  },
+  {
+    "id": "mqttCmd",
+    "type": "mqtt out",
+    "z": "tab_main",
+    "name": "colormix/cmd",
+    "topic": "colormix/cmd",
+    "qos": "1",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker",
+    "x": 470,
+    "y": 960,
+    "wires": []
+  },
+  {
+    "id": "simIn",
+    "type": "mqtt in",
+    "z": "tab_sim",
+    "name": "colormix/order",
+    "topic": "colormix/order",
+    "qos": "1",
+    "datatype": "json",
+    "broker": "broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 150,
+    "y": 80,
+    "wires": [
+      [
+        "simFn"
+      ]
+    ]
+  },
+  {
+    "id": "simFn",
+    "type": "function",
+    "z": "tab_sim",
+    "name": "Simulasi mixing",
+    "func": "// Simulator ESP32: aktifkan tab ini untuk demo tanpa hardware.\nconst o = msg.payload;\nconst steps = [\"red\", \"green\", \"blue\"].filter(k => o.dose && o.dose[k] > 0);\nconst send = (state, progress, step) => node.send({\n  topic: \"colormix/status\",\n  payload: { device: \"esp32-sim\", state, order: o.id, progress, step, rssi: -50 }\n});\nsend(\"mixing\", 0, steps[0] || \"\");\nsteps.forEach((k, i) => setTimeout(() => send(\"mixing\", Math.round((i + 1) / steps.length * 100), k), (i + 1) * 1500));\nsetTimeout(() => send(\"done\", 100, \"\"), (steps.length + 1) * 1500);\nsetTimeout(() => send(\"idle\", 0, \"\"), (steps.length + 3) * 1500);\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 360,
+    "y": 80,
+    "wires": [
+      [
+        "simOut"
+      ]
+    ]
+  },
+  {
+    "id": "simOut",
+    "type": "mqtt out",
+    "z": "tab_sim",
+    "name": "colormix/status",
+    "topic": "",
+    "qos": "1",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker",
+    "x": 570,
+    "y": 80,
+    "wires": []
+  }
+]

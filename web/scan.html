@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ColorMix – Scanner</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="common.js"></script>
+</head>
+<body>
+<header>
+  <h1>🎨 ColorMix <span>/ Scanner</span></h1>
+  <nav>
+    <a href="index.html">Buat Warna</a>
+    <a href="scan.html" class="active">Scanner</a>
+  </nav>
+</header>
+
+<main>
+  <!-- LEFT: camera -->
+  <section class="card">
+    <h2>Kamera</h2>
+    <div class="video-wrap" id="videoWrap">
+      <video id="video" playsinline muted></video>
+      <div class="frame"></div>
+    </div>
+    <div class="row">
+      <div><select id="camSelect"><option>Memuat kamera…</option></select></div>
+      <div style="flex:none" class="btns">
+        <button class="btn" id="camBtn">⏸ Stop</button>
+      </div>
+    </div>
+    <label for="file">Atau scan dari file gambar QR</label>
+    <input type="file" id="file" accept="image/*">
+    <canvas id="work" hidden></canvas>
+  </section>
+
+  <!-- RIGHT: result + ESP32 status -->
+  <section class="card">
+    <h2>Hasil scan</h2>
+    <div class="status" id="scanStatus">Arahkan QR code ke kamera…</div>
+    <div class="swatch" id="swatch" style="height:110px;background:var(--bg)"><span id="swatchLabel">—</span></div>
+    <dl class="kv">
+      <dt>ID</dt><dd id="oId">—</dd>
+      <dt>Nama</dt><dd id="oName">—</dd>
+      <dt>RGB</dt><dd id="oRgb">—</dd>
+      <dt>Volume</dt><dd id="oVol">—</dd>
+    </dl>
+    <div class="mix" id="mix"></div>
+
+    <div class="btns" style="margin-bottom:10px">
+      <button class="btn primary" id="sendBtn" disabled>Kirim ke Mixer</button>
+      <label style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" id="autoSend"> Kirim otomatis</label>
+    </div>
+    <div class="status" id="sendStatus" hidden></div>
+
+    <h2 style="margin-top:22px">Status ESP32</h2>
+    <div class="status" id="espStatus"><span class="dot"></span>Menunggu data…</div>
+    <div class="progress"><div id="espProg"></div></div>
+    <p class="muted" id="espDetail"></p>
+
+    <details style="margin-top:14px">
+      <summary class="muted">Pengaturan server</summary>
+      <label for="api" style="margin-top:8px">URL Node-RED (kosong = server yang sama)</label>
+      <input type="text" id="api" placeholder="http://localhost:1880">
+    </details>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const video = $("video"), work = $("work"), wctx = work.getContext("2d", { willReadFrequently: true });
+let stream = null, scanning = false, order = null, lastRaw = "", lastRawAt = 0;
+
+// ---------- API base ----------
+const AKEY = "colormix.api";
+const defaultApi = location.protocol === "file:" ? "http://localhost:1880" : "";
+try { $("api").value = localStorage.getItem(AKEY) ?? defaultApi; } catch { $("api").value = defaultApi; }
+$("api").addEventListener("change", () => { try { localStorage.setItem(AKEY, $("api").value.trim()); } catch {} });
+const api = (p) => $("api").value.trim().replace(/\/$/, "") + p;
+
+function setStatus(el, text, cls = "") { el.hidden = false; el.className = "status " + cls; el.textContent = text; }
+
+// ---------- Camera ----------
+async function listCams() {
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+  const sel = $("camSelect"), prev = sel.value;
+  sel.innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${d.label || "Kamera " + (i + 1)}</option>`).join("");
+  if (devs.some(d => d.deviceId === prev)) sel.value = prev;
+}
+
+async function startCam(deviceId) {
+  stopCam();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment", width: { ideal: 1280 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    scanning = true;
+    $("camBtn").textContent = "⏸ Stop";
+    await listCams();
+    const track = stream.getVideoTracks()[0];
+    if (track.getSettings().deviceId) $("camSelect").value = track.getSettings().deviceId;
+    requestAnimationFrame(tick);
+  } catch (e) {
+    setStatus($("scanStatus"), "Tidak bisa membuka kamera: " + e.message + " (buka halaman via http://localhost)", "err");
+  }
+}
+function stopCam() {
+  scanning = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  $("camBtn").textContent = "▶ Start";
+}
+$("camBtn").addEventListener("click", () => scanning ? stopCam() : startCam($("camSelect").value));
+$("camSelect").addEventListener("change", e => startCam(e.target.value));
+
+let lastScanAt = 0;
+function tick(t) {
+  if (!scanning) return;
+  if (video.readyState === video.HAVE_ENOUGH_DATA && t - lastScanAt > 120) {   // ~8 scans/second
+    lastScanAt = t;
+    const scale = Math.min(1, 640 / video.videoWidth);
+    work.width = video.videoWidth * scale; work.height = video.videoHeight * scale;
+    wctx.drawImage(video, 0, 0, work.width, work.height);
+    const img = wctx.getImageData(0, 0, work.width, work.height);
+    const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+    if (code && code.data) onDecoded(code.data);
+  }
+  requestAnimationFrame(tick);
+}
+
+// ---------- File upload ----------
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    work.width = img.width; work.height = img.height;
+    wctx.drawImage(img, 0, 0);
+    const d = wctx.getImageData(0, 0, img.width, img.height);
+    const code = jsQR(d.data, d.width, d.height);
+    if (code) { lastRaw = ""; onDecoded(code.data); }
+    else setStatus($("scanStatus"), "QR tidak terdeteksi di gambar.", "err");
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(f);
+});
+
+// ---------- Decode + validate ----------
+function onDecoded(raw) {
+  const now = Date.now();
+  if (raw === lastRaw && now - lastRawAt < 4000) return; // same QR still in front of camera
+  lastRaw = raw; lastRawAt = now;
+
+  $("videoWrap").classList.add("hit");
+  setTimeout(() => $("videoWrap").classList.remove("hit"), 600);
+
+  let o;
+  try { o = JSON.parse(raw); } catch { return setStatus($("scanStatus"), "QR terbaca tapi bukan JSON ColorMix.", "err"); }
+  const err = ColorMix.validateOrder(o);
+  if (err) return setStatus($("scanStatus"), "Data tidak valid: " + err, "err");
+
+  if (order && order.id === o.id) return; // already showing this order
+  order = o;
+  const hex = ColorMix.rgbToHex(o.r, o.g, o.b);
+  $("swatch").style.background = hex;
+  $("swatchLabel").textContent = hex;
+  $("oId").textContent = o.id;
+  $("oName").textContent = o.name || "-";
+  $("oRgb").textContent = `${o.r}, ${o.g}, ${o.b}`;
+  $("oVol").textContent = o.vol + " ml";
+  ColorMix.renderMix($("mix"), ColorMix.computeDose(o.r, o.g, o.b, o.vol));
+  setStatus($("scanStatus"), "✔ QR valid terbaca: " + o.id, "ok");
+  $("sendBtn").disabled = false;
+  $("sendStatus").hidden = true;
+  if ($("autoSend").checked) send();
+}
+
+// ---------- Send to Node-RED ----------
+async function send(force = false) {
+  if (!order) return;
+  $("sendBtn").disabled = true;
+  setStatus($("sendStatus"), "Mengirim…");
+  try {
+    const res = await fetch(api("/api/order"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...order, force }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (body.warning) setStatus($("sendStatus"), "⚠ Terkirim, tapi " + body.warning, "warn");
+      else setStatus($("sendStatus"), "✔ Terkirim ke mixer (MQTT colormix/order).", "ok");
+    } else if (res.status === 409 && body.code === "duplicate") {
+      if (confirm("Order " + order.id + " sudah pernah diproses. Kirim ulang?")) return send(true);
+      setStatus($("sendStatus"), "Dibatalkan: order sudah pernah diproses.", "warn");
+    } else {
+      setStatus($("sendStatus"), "Ditolak (" + res.status + "): " + (body.error || res.statusText), "err");
+    }
+  } catch (e) {
+    setStatus($("sendStatus"), "Gagal menghubungi Node-RED: " + e.message, "err");
+  } finally {
+    $("sendBtn").disabled = false;
+  }
+}
+$("sendBtn").addEventListener("click", () => send());
+
+// ---------- ESP32 status polling ----------
+async function pollStatus() {
+  try {
+    const res = await fetch(api("/api/status"));
+    const s = await res.json();
+    const st = s.state || "unknown";
+    const cls = st === "offline" || st === "unknown" ? "off" : ["mixing", "tuning", "priming"].includes(st) ? "busy" : "on";
+    const age = s.ts ? Math.round((Date.now() - s.ts) / 1000) : null;
+    $("espStatus").className = "status";
+    $("espStatus").innerHTML = `<span class="dot ${cls}"></span><b>${st.toUpperCase()}</b>` +
+      (s.device ? ` · ${s.device}` : "") + (age !== null ? ` · ${age}s lalu` : "");
+    $("espProg").style.width = (s.progress || 0) + "%";
+    $("espDetail").textContent = [s.order && "Order: " + s.order, s.step && "Langkah: " + s.step,
+                                  s.rssi && "WiFi: " + s.rssi + " dBm"].filter(Boolean).join(" · ");
+  } catch {
+    $("espStatus").innerHTML = `<span class="dot off"></span>Node-RED tidak terjangkau`;
+  }
+}
+setInterval(pollStatus, 1500);
+pollStatus();
+
+if (navigator.mediaDevices?.getUserMedia) startCam();
+else setStatus($("scanStatus"), "Browser tidak mendukung kamera. Buka via http://localhost:1880/scan.html", "err");
+</script>
+</body>
+</html>

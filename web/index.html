@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ColorMix – Buat Warna</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+  <script src="common.js"></script>
+</head>
+<body>
+<header>
+  <h1>🎨 ColorMix <span>/ Custom Warna Cat</span></h1>
+  <nav>
+    <a href="index.html" class="active">Buat Warna</a>
+    <a href="scan.html">Scanner</a>
+  </nav>
+</header>
+
+<main>
+  <!-- LEFT: color editor -->
+  <section class="card">
+    <h2>1. Pilih warna</h2>
+    <div class="swatch" id="swatch"><span id="swatchLabel">#000000</span></div>
+
+    <div class="presets" id="presets"></div>
+
+    <div class="row">
+      <div><label for="picker">Color picker</label><input type="color" id="picker" value="#1E6EC8"></div>
+      <div><label for="hex">HEX</label><input type="text" id="hex" maxlength="7" value="#1E6EC8"></div>
+    </div>
+
+    <div class="slider-row"><b style="color:#e11d48">R</b><input type="range" id="rRange" min="0" max="255"><input type="number" id="rNum" min="0" max="255"></div>
+    <div class="slider-row"><b style="color:#16a34a">G</b><input type="range" id="gRange" min="0" max="255"><input type="number" id="gNum" min="0" max="255"></div>
+    <div class="slider-row"><b style="color:#2563eb">B</b><input type="range" id="bRange" min="0" max="255"><input type="number" id="bNum" min="0" max="255"></div>
+
+    <div class="row" style="margin-top:14px">
+      <div><label for="name">Nama warna</label><input type="text" id="name" maxlength="32" placeholder="mis. Biru Laut"></div>
+      <div>
+        <label for="vol">Volume</label>
+        <select id="vol">
+          <option value="100">100 ml</option>
+          <option value="250" selected>250 ml</option>
+          <option value="500">500 ml</option>
+          <option value="1000">1 liter</option>
+        </select>
+      </div>
+    </div>
+
+    <label>Estimasi komposisi cat</label>
+    <div class="mix" id="mix"></div>
+
+    <button class="btn primary" id="genBtn" style="width:100%">Buat QR Code</button>
+  </section>
+
+  <!-- RIGHT: QR result -->
+  <section class="card">
+    <h2>2. QR Code</h2>
+    <canvas id="qrCanvas" width="400" height="500"></canvas>
+    <label>Isi JSON di dalam QR</label>
+    <pre id="jsonOut">Klik "Buat QR Code"</pre>
+    <div class="btns">
+      <button class="btn" id="dlPng" disabled>⬇ Download PNG</button>
+      <button class="btn" id="dlJson" disabled>⬇ Download JSON</button>
+      <button class="btn" id="printBtn" disabled>🖨 Print</button>
+    </div>
+
+    <h2 style="margin-top:22px">Riwayat</h2>
+    <ul class="history" id="history"></ul>
+    <p class="muted" id="historyEmpty">Belum ada warna dibuat.</p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { r: 30, g: 110, b: 200 };
+let current = null; // last generated order object
+
+const PRESETS = ["#E53935","#FB8C00","#FDD835","#43A047","#00897B","#1E88E5","#3949AB","#8E24AA",
+                 "#D81B60","#6D4C41","#F5F5DC","#FFFFFF","#9E9E9E","#455A64","#212121","#A5D6A7"];
+$("presets").innerHTML = PRESETS.map(c => `<button title="${c}" style="background:${c}" data-c="${c}"></button>`).join("");
+$("presets").addEventListener("click", e => { const c = e.target.dataset.c; if (c) setRgb(ColorMix.hexToRgb(c)); });
+
+function setRgb({ r, g, b }) {
+  state.r = ColorMix.clamp(r); state.g = ColorMix.clamp(g); state.b = ColorMix.clamp(b);
+  render();
+}
+
+function render() {
+  const { r, g, b } = state;
+  const hex = ColorMix.rgbToHex(r, g, b);
+  for (const k of ["r", "g", "b"]) { $(k + "Range").value = state[k]; $(k + "Num").value = state[k]; }
+  $("picker").value = hex.toLowerCase();
+  if (document.activeElement !== $("hex")) $("hex").value = hex;
+  $("swatch").style.background = hex;
+  $("swatchLabel").textContent = `${hex}  ·  rgb(${r}, ${g}, ${b})`;
+  ColorMix.renderMix($("mix"), ColorMix.computeDose(r, g, b, Number($("vol").value)));
+}
+
+for (const k of ["r", "g", "b"]) {
+  $(k + "Range").addEventListener("input", e => setRgb({ ...state, [k]: e.target.value }));
+  $(k + "Num").addEventListener("input", e => setRgb({ ...state, [k]: e.target.value }));
+}
+$("picker").addEventListener("input", e => setRgb(ColorMix.hexToRgb(e.target.value)));
+$("hex").addEventListener("input", e => { const c = ColorMix.hexToRgb(e.target.value); if (c) setRgb(c); });
+$("vol").addEventListener("change", render);
+
+function makeId() {
+  const d = new Date();
+  const ymd = d.toISOString().slice(0, 10).replace(/-/g, "");
+  const rnd = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `CM-${ymd}-${rnd}`;
+}
+
+// Draw QR + color label onto canvas so the printed card is self-explanatory.
+function drawCard(order) {
+  const json = JSON.stringify(order);
+  const qr = qrcode(0, "M");
+  qr.addData(json);
+  qr.make();
+
+  const cv = $("qrCanvas"), ctx = cv.getContext("2d");
+  const W = cv.width, n = qr.getModuleCount(), margin = 24;
+  const cell = Math.floor((W - margin * 2) / n);
+  const qrSize = cell * n, off = Math.floor((W - qrSize) / 2);
+
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, cv.height);
+  ctx.fillStyle = "#000";
+  for (let r = 0; r < n; r++)
+    for (let c = 0; c < n; c++)
+      if (qr.isDark(r, c)) ctx.fillRect(off + c * cell, off + r * cell, cell, cell);
+
+  const y0 = off + qrSize + 16;
+  const hex = ColorMix.rgbToHex(order.r, order.g, order.b);
+  ctx.fillStyle = hex; ctx.fillRect(margin, y0, 64, 64);
+  ctx.strokeStyle = "#ccc"; ctx.strokeRect(margin, y0, 64, 64);
+  ctx.fillStyle = "#111"; ctx.font = "bold 20px system-ui, sans-serif";
+  ctx.fillText(order.name || "Tanpa nama", margin + 80, y0 + 22);
+  ctx.font = "15px ui-monospace, monospace"; ctx.fillStyle = "#444";
+  ctx.fillText(`${hex}  RGB(${order.r},${order.g},${order.b})`, margin + 80, y0 + 44);
+  ctx.fillText(`${order.vol} ml · ${order.id}`, margin + 80, y0 + 64);
+}
+
+function show(order) {
+  current = order;
+  drawCard(order);
+  $("jsonOut").textContent = JSON.stringify(order, null, 2);
+  ["dlPng", "dlJson", "printBtn"].forEach(id => $(id).disabled = false);
+}
+
+$("genBtn").addEventListener("click", () => {
+  const order = {
+    v: 1,
+    id: makeId(),
+    name: $("name").value.trim() || "Custom",
+    r: state.r, g: state.g, b: state.b,
+    vol: Number($("vol").value),
+  };
+  show(order);
+  saveHistory(order);
+});
+
+function download(name, url) {
+  const a = document.createElement("a"); a.href = url; a.download = name; a.click();
+}
+$("dlPng").addEventListener("click", () => download(`${current.id}.png`, $("qrCanvas").toDataURL("image/png")));
+$("dlJson").addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(current, null, 2)], { type: "application/json" });
+  download(`${current.id}.json`, URL.createObjectURL(blob));
+});
+$("printBtn").addEventListener("click", () => {
+  const w = window.open("");
+  w.document.write(`<img src="${$("qrCanvas").toDataURL()}" style="width:8cm" onload="print()">`);
+});
+
+// History (per-browser, localStorage)
+const HKEY = "colormix.history";
+function loadHistory() { try { return JSON.parse(localStorage.getItem(HKEY)) || []; } catch { return []; } }
+function saveHistory(o) {
+  const h = [o, ...loadHistory()].slice(0, 15);
+  try { localStorage.setItem(HKEY, JSON.stringify(h)); } catch {}
+  renderHistory();
+}
+function renderHistory() {
+  const h = loadHistory();
+  $("historyEmpty").style.display = h.length ? "none" : "";
+  $("history").innerHTML = h.map((o, i) =>
+    `<li data-i="${i}"><i style="background:${ColorMix.rgbToHex(o.r, o.g, o.b)}"></i>${o.name} · ${o.vol} ml<small>${o.id}</small></li>`).join("");
+}
+$("history").addEventListener("click", e => {
+  const li = e.target.closest("li"); if (!li) return;
+  const o = loadHistory()[li.dataset.i];
+  setRgb(o); $("name").value = o.name; $("vol").value = o.vol; render(); show(o);
+});
+
+render();
+renderHistory();
+</script>
+</body>
+</html>

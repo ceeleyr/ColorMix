@@ -1,0 +1,45 @@
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Node-RED runtime data ----
+# Keep flows.json, package.json, settings.js, lib/ — ignore the rest
+node-red/data/node_modules/
+node-red/data/.config.runtime.json
+node-red/data/.config.users.json
+node-red/data/.config.users.json.backup
+node-red/data/.config.nodes.json
+node-red/data/.config.nodes.json.backup
+node-red/data/flows_cred.json
+node-red/data/.flows*.json.backup
+node-red/data/*.backup
+node-red/data/.sessions.json
+node-red/data/context/
+
+# ---- Node / npm ----
+node_modules/
+npm-debug.log*
+
+# ---- Arduino / ESP32 build output ----
+esp32/**/build/
+esp32/**/*.bin
+esp32/**/*.elf
+esp32/**/*.map
+
+# ---- Docker / data volumes (if bind-mounted locally) ----
+influxdb-data/
+grafana-data/
+mosquitto/data/
+mosquitto/log/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Claude Code local settings ----
+.claude/settings.local.json
